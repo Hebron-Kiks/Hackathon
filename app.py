@@ -16,8 +16,11 @@ def get_db_connection():
 # -----------------------------
 # Hugging Face API Setup
 # -----------------------------
-HF_API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"  # Example model
-HF_API_KEY = os.environ.get("HF_API_KEY")  # Store in Render environment variables
+HF_API_URL = "https://api-inference.huggingface.co/models/facebook/bart-large-cnn"
+HF_API_KEY = os.environ.get("HF_API_KEY")
+
+if not HF_API_KEY:
+    raise ValueError("HF_API_KEY is not set in environment variables")
 
 headers = {"Authorization": f"Bearer {HF_API_KEY}"}
 
@@ -31,7 +34,7 @@ def home():
 @app.route("/generate", methods=["POST"])
 def generate_flashcards():
     try:
-        data = request.get_json()
+        data = request.get_json(force=True)
         notes = data.get("notes", "")
 
         if not notes.strip():
@@ -39,18 +42,33 @@ def generate_flashcards():
 
         # Call Hugging Face API
         response = requests.post(HF_API_URL, headers=headers, json={"inputs": notes})
-        
-        if response.status_code != 200:
-            return jsonify({"error": "Hugging Face API error", "details": response.text}), 500
 
-        # Simplify response into mock flashcards (you can refine logic here)
-        summary = response.json()[0]["summary_text"]
+        if response.status_code != 200:
+            return jsonify({
+                "error": "Hugging Face API error",
+                "details": response.text
+            }), 500
+
+        hf_output = response.json()
+
+        # Ensure response is in expected format
+        if isinstance(hf_output, list) and "summary_text" in hf_output[0]:
+            summary = hf_output[0]["summary_text"]
+        elif isinstance(hf_output, dict) and "summary_text" in hf_output:
+            summary = hf_output["summary_text"]
+        else:
+            return jsonify({
+                "error": "Unexpected Hugging Face API response",
+                "details": hf_output
+            }), 500
+
+        # Flashcards from summary
         flashcards = [
             {"question": "Summarize the notes:", "answer": summary},
             {"question": "Main topic?", "answer": summary.split(".")[0]}
         ]
 
-        # Save flashcards into PostgreSQL
+        # Save to PostgreSQL
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute("""
@@ -61,8 +79,10 @@ def generate_flashcards():
             )
         """)
         for card in flashcards:
-            cur.execute("INSERT INTO flashcards (question, answer) VALUES (%s, %s)", 
-                        (card["question"], card["answer"]))
+            cur.execute(
+                "INSERT INTO flashcards (question, answer) VALUES (%s, %s)",
+                (card["question"], card["answer"])
+            )
         conn.commit()
         cur.close()
         conn.close()
